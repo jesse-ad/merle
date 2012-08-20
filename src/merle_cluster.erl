@@ -12,7 +12,7 @@ configure(MemcachedHosts, _ConnectionsPerHost) ->
         -export([get_server/1]).
         get_server(ClusterKey) -> N = erlang:phash2(ClusterKey, ~p), 
             do_get_server(N).\n",
-    DynModuleMap = "do_get_server(~p) -> {~p}; ",
+    DynModuleMap = "do_get_server(~p) -> ~p; ",
     DynModuleEnd = "do_get_server(_N) -> throw({invalid_server_slot, _N}).\n",
     
     ModuleString = lists:flatten([

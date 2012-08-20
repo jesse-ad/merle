@@ -53,6 +53,7 @@
 
 %% gen_server API
 -export([
+    start_link/1,
     stats/1, stats/2, version/1, 
     getkey/3, getkeys/3, getskey/3, 
     delete/3, delete/4,  
