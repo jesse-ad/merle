@@ -313,7 +313,7 @@ connect() ->
 
 %% @doc connect to memcached
 connect(Host, Port) ->
-	start_link(Host, Port).
+	start_link([Host, Port]).
 
 %% @doc disconnect from memcached
 disconnect(Ref) ->
@@ -321,7 +321,7 @@ disconnect(Ref) ->
 	ok.
 
 %% @private
-start_link(Host, Port) ->
+start_link([Host, Port]) ->
     gen_server2:start_link(?MODULE, [Host, Port], []).
 
 %% @private
