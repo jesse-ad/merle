@@ -7,7 +7,7 @@
 -behaviour(supervisor).
 
 start_link(Instances, ConnectionsPerInstance) ->
-    {ok, Pid} = supervisor:start_link({local, ?MODULE}, ?MODULE, []),
+    {ok, Pid} = supervisor:start_link({local, ?MODULE}, ?MODULE, [Instances, ConnectionsPerInstance]),
 
     %local_pg2:start(),
     merle_cluster:configure(Instances, ConnectionsPerInstance),
@@ -28,7 +28,7 @@ poolboy_children([[Host, Port] | Rest], ConnectionsPerInstance, Acc) ->
     PBName = server_name(Host, Port),
 
     PBChild = poolboy:child_spec(
-        PBName, 
+        PBName,
         [
             {name, {local, PBName}}, 
             {worker_module, merle}, 
