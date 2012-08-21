@@ -2,11 +2,15 @@
 
 -export([configure/2, exec/4]).
 
+-define(BUFFER_TABLE_NAME, merle_buffer).
+
 index_map(F, List) ->
     {Map, _} = lists:mapfoldl(fun(X, Iter) -> {F(X, Iter), Iter +1} end, 1, List),
     Map.
 
-configure(MemcachedHosts, _ConnectionsPerHost) ->
+configure(MemcachedHosts, ConnectionsPerHost) ->
+    ets:new(?BUFFER_TABLE_NAME, [set, public, named_table]),
+    
     SortedMemcachedHosts = lists:sort(MemcachedHosts),
     DynModuleBegin = "-module(merle_cluster_dynamic).
         -export([get_server/1]).
@@ -17,7 +21,14 @@ configure(MemcachedHosts, _ConnectionsPerHost) ->
     
     ModuleString = lists:flatten([
         io_lib:format(DynModuleBegin, [length(SortedMemcachedHosts)]),
-        index_map(fun([Host, Port], I) -> io_lib:format(DynModuleMap, [I-1, merle_sup:server_name(Host, Port)]) end, SortedMemcachedHosts),
+        index_map(
+            fun([Host, Port], I) -> 
+                ServerName = merle_sup:server_name(Host, Port),
+                io_lib:format(DynModuleMap, [I-1, ServerName]),
+                ets:insert(?BUFFER_TABLE_NAME, {ServerName, ConnectionsPerHost})
+            end, 
+            SortedMemcachedHosts
+        ),
         DynModuleEnd
     ]),
     
@@ -49,6 +60,16 @@ configure(MemcachedHosts, _ConnectionsPerHost) ->
 exec(Key, Fun, FullDefault, ConnectionTimeout) ->
     S = merle_cluster_dynamic:get_server(Key),
 
+    BufferCounter = ets:update_counter(?BUFFER_TABLE_NAME, S, -1),
+    
+    exec(BufferCounter, S, Key, Fun, FullDefault, ConnectionTimeout).
+        
+            
+exec(BufferCounter, ServerName, _Key, _Fun, FullDefault, _ConnectionTimeout) when BufferCounter < 0 ->
+    ets:update_counter(?BUFFER_TABLE_NAME, ServerName, 1),
+    FullDefault;
+
+exec(_BufferCounter, ServerName, Key, Fun, FullDefault, ConnectionTimeout) ->
     FromPid = self(),
 
     ConnFetchPid = spawn(
@@ -56,10 +77,11 @@ exec(Key, Fun, FullDefault, ConnectionTimeout) ->
             
             MonitorRef = erlang:monitor(process, FromPid),
 
-            FromPid ! {merle_conn, poolboy:checkout(S, false)},
+            FromPid ! {merle_conn, poolboy:checkout(ServerName, false)},
             
             receive
                 {'DOWN', MonitorRef, _, _, _} -> 
+                    ets:update_counter(?BUFFER_TABLE_NAME, ServerName, 1),
                     ok;
                 done -> 
                     ok;
@@ -80,7 +102,7 @@ exec(Key, Fun, FullDefault, ConnectionTimeout) ->
         
         {merle_conn, P} ->
             Value = Fun(P, Key),
-            poolboy:checkin(S, P),
+            poolboy:checkin(ServerName, P),
             Value
 
         after ConnectionTimeout ->
@@ -89,4 +111,7 @@ exec(Key, Fun, FullDefault, ConnectionTimeout) ->
     
     ConnFetchPid ! done,
 
+    ets:update_counter(?BUFFER_TABLE_NAME, ServerName, 1),
+
     ReturnValue.
+    
