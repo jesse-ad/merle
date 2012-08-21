@@ -1,6 +1,6 @@
 -module(merle_cluster).
 
--export([configure/2, exec/3]).
+-export([configure/2, exec/4]).
 
 index_map(F, List) ->
     {Map, _} = lists:mapfoldl(fun(X, Iter) -> {F(X, Iter), Iter +1} end, 1, List),
@@ -46,22 +46,47 @@ configure(MemcachedHosts, _ConnectionsPerHost) ->
 %% Executes specified function, choosing some connection from the connection pool, then running function
 %% then returning back to the pool
 %%
-exec(Key, Fun, FullDefault) ->
+exec(Key, Fun, FullDefault, ConnectionTimeout) ->
     S = merle_cluster_dynamic:get_server(Key),
 
-    case poolboy:checkout(S, false) of
+    FromPid = self(),
 
-        full -> 
-            log4erl:error("Merle pool is empty!"),
-        
-            FullDefault;
+    ConnFetchPid = spawn(
+        fun() -> 
             
-        P ->
+            MonitorRef = erlang:monitor(process, FromPid),
 
+            FromPid ! {merle_conn, poolboy:checkout(S, false)},
+            
+            receive
+                {'DOWN', MonitorRef, _, _, _} -> 
+                    ok;
+                done -> 
+                    ok;
+                Other -> 
+                    log4erl:error("Merle connection unexpected message ~p", [Other])
+            after 1000 ->
+                log4erl:error("Merle connection fetch process timed out")
+            end,
+            
+            true = erlang:demonitor(MonitorRef)
+        end
+    ),
+
+    ReturnValue = receive 
+        {merle_conn, full} ->
+            log4erl:error("Merle pool is empty!"),
+            FullDefault;
+        
+        {merle_conn, P} ->
             Value = Fun(P, Key),
-
             poolboy:checkin(S, P),
-
             Value
+
+        after ConnectionTimeout ->
+            FullDefault
+    end,
     
-    end.
+    ConnFetchPid ! done,
+
+    ReturnValue.

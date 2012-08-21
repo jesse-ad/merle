@@ -54,15 +54,15 @@
 %% gen_server API
 -export([
     start_link/1,
-    stats/1, stats/2, version/1, 
-    getkey/3, getkeys/3, getskey/3, 
-    delete/3, delete/4,  
-    replace/4, replace/6,  
+    stats/1, stats/2, version/1,
+    getkey/3, getkeys/3, getskey/3,
+    delete/3, delete/4,
+    replace/4, replace/6,
     set/6, set/4, set/5,
     cas/5, cas/7,
     add/4, add/6,
     incr/4, decr/4, incr_counter/4, incr_counter/5, getcounter/3,
-    flushall/1, flushall/2, 
+    flushall/1, flushall/2,
     verbosity/2, connect/0, connect/2, disconnect/1
 ]).
 
