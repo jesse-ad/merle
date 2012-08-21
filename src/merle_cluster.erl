@@ -1,6 +1,6 @@
 -module(merle_cluster).
 
--export([configure/2, exec/2]).
+-export([configure/2, exec/3]).
 
 index_map(F, List) ->
     {Map, _} = lists:mapfoldl(fun(X, Iter) -> {F(X, Iter), Iter +1} end, 1, List),
@@ -46,13 +46,22 @@ configure(MemcachedHosts, _ConnectionsPerHost) ->
 %% Executes specified function, choosing some connection from the connection pool, then running function
 %% then returning back to the pool
 %%
-exec(Key, Fun) ->
+exec(Key, Fun, FullDefault) ->
     S = merle_cluster_dynamic:get_server(Key),
-    P = poolboy:checkout(S),
 
-    Value = Fun(P, Key),
+    case poolboy:checkout(S, false) of
 
-    poolboy:checkin(S, P),
+        full -> 
+            log4erl:error("Merle pool is empty!"),
+        
+            FullDefault;
+            
+        P ->
 
-    Value.
+            Value = Fun(P, Key),
+
+            poolboy:checkin(S, P),
+
+            Value
     
+    end.
