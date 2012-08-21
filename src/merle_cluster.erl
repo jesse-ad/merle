@@ -24,8 +24,8 @@ configure(MemcachedHosts, ConnectionsPerHost) ->
         index_map(
             fun([Host, Port], I) -> 
                 ServerName = merle_sup:server_name(Host, Port),
-                io_lib:format(DynModuleMap, [I-1, ServerName]),
-                ets:insert(?BUFFER_TABLE_NAME, {ServerName, ConnectionsPerHost})
+                ets:insert(?BUFFER_TABLE_NAME, {ServerName, ConnectionsPerHost}),
+                io_lib:format(DynModuleMap, [I-1, ServerName])
             end, 
             SortedMemcachedHosts
         ),
