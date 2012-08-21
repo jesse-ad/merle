@@ -81,6 +81,7 @@ exec(_BufferCounter, ServerName, Key, Fun, FullDefault, ConnectionTimeout) ->
             
             receive
                 {'DOWN', MonitorRef, _, _, _} -> 
+                    log4erl:error("Merle connection fetch process received 'DOWN' message"),
                     ets:update_counter(?BUFFER_TABLE_NAME, ServerName, 1),
                     ok;
                 done -> 
