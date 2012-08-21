@@ -99,18 +99,27 @@ exec(_BufferCounter, ServerName, Key, Fun, FullDefault, ConnectionTimeout) ->
     ReturnValue = receive 
         {merle_conn, full} ->
             log4erl:error("Merle pool is empty!"),
+
+            ConnFetchPid ! done,
+
             FullDefault;
         
         {merle_conn, P} ->
             Value = Fun(P, Key),
+
             poolboy:checkin(ServerName, P),
-            Value
+
+            ConnFetchPid ! done,
+
+            Value;
 
         after ConnectionTimeout ->
+    
+            exit(ConnFetchPid, kill),
+    
             FullDefault
     end,
     
-    ConnFetchPid ! done,
 
     ets:update_counter(?BUFFER_TABLE_NAME, ServerName, 1),
 
