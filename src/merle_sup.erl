@@ -2,20 +2,22 @@
 
 -export([start_link/2, init/1]).
 
--export([start_child/1]).
-
 -behaviour(supervisor).
 
 start_link(Instances, ConnectionsPerInstance) ->
-    {ok, Pid} = supervisor:start_link({local, ?MODULE}, ?MODULE, []),
-    local_pg2:start(),
-    merle_cluster:configure(Instances, ConnectionsPerInstance),
-    {ok, Pid}.
+    supervisor:start_link({local, ?MODULE}, ?MODULE, [Instances, ConnectionsPerInstance]).
 
-start_child(N) ->
-    supervisor:start_child(?MODULE, [N]).
+init([Instances, ConnectionsPerInstance]) ->
+    MerlePool = 
+        {merle_pool, 
+            {merle_pool, start_link, []},
+            permanent, 5000, worker, dynamic
+        },
 
-init([]) ->
-    MCDSpec = {mcd, {merle_watcher, start_link, []},
-                permanent, 5000, worker, dynamic},
-    {ok, {{simple_one_for_one, 10, 10}, [MCDSpec]}}.
+    MerleWatcherSup = 
+        {merle_watcher_sup, 
+            {merle_watcher_sup, start_link, [Instances, ConnectionsPerInstance]},
+            permanent, 5000, supervisor, dynamic
+        },
+
+    {ok, {{one_for_all, 10, 10}, [MerlePool, MerleWatcherSup]}}.

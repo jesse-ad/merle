@@ -2,11 +2,16 @@
 
 -export([start_link/1, init/1, handle_call/3, handle_info/2, handle_cast/2, terminate/2]).
 
--define(RESTART_INTERVAL, 1000). %% retry each 5 seconds. 
+-export([merle_connection/1, monitor/2, demonitor/1]).
 
--record(state, {mcd_pid, 
-                host,
-                port}).
+-define(RESTART_INTERVAL, 5000). %% retry each 5 seconds. 
+
+-record(state, {
+    mcd_pid, 
+    host,
+    port,
+    monitor
+}).
 
 start_link([Host, Port]) ->
     gen_server:start_link(?MODULE, [Host, Port], []).
@@ -14,19 +19,60 @@ start_link([Host, Port]) ->
 init([Host, Port]) ->
    log4erl:info("Merle watcher initialized!"),
    erlang:process_flag(trap_exit, true),
-   self() ! timeout,
+
+   SelfPid = self(),
+
+   merle_pool:create({Host, Port}),
+
+   merle_pool:join({Host, Port}, SelfPid),
+
+   merle_pool:checkout_pid(SelfPid),
+
+   SelfPid ! connect,   
+   
    {ok, #state{mcd_pid = undefined, host = Host, port = Port}}.
+
+merle_connection(Pid) ->
+    gen_server:call(Pid, mcd_pid).
+
+monitor(Pid, OwnerPid) ->
+    gen_server:call(Pid, {monitor, OwnerPid}).
+
+demonitor(Pid) ->
+    gen_server:call(Pid, demonitor).
+
+handle_call(mcd_pid, _From, State = #state{mcd_pid = McdPid}) ->
+   {reply, McdPid, State};
+
+handle_call({monitor, MonitorPid}, _From, State = #state{monitor = PrevMonitor}) ->
+   case PrevMonitor of
+       undefined -> ok;
+       _ ->
+           true = erlang:demonitor(PrevMonitor)
+   end,
+    
+   Monitor = erlang:monitor(process, MonitorPid),
+
+   {reply, ok, State#state{monitor = Monitor}};
+
+handle_call(demonitor, _From, State = #state{monitor = PrevMonitor}) ->
+    case PrevMonitor of
+        undefined -> ok;
+        _ ->
+            true = erlang:demonitor(PrevMonitor)
+    end,
+
+    {reply, ok, State#state{monitor = undefined}};
 
 handle_call(_Call, _From, S) ->
     {reply, ok, S}.
     
-handle_info('timeout', #state{mcd_pid = undefined, host = Host, port = Port} = State) ->
-    error_logger:info_report([{memcached, connecting}, {host, Host}, {port, Port}]),
-
+handle_info('connect', #state{mcd_pid = undefined, host = Host, port = Port} = State) ->
     case merle:connect(Host, Port) of
         {ok, Pid} ->
-            local_pg2:create({Host, Port}),
-            local_pg2:join({Host, Port}, Pid),
+
+            merle_pool:checkin_pid(self()),
+
             {noreply, State#state{mcd_pid = Pid}};
 
         {error, Reason} ->
@@ -45,32 +91,36 @@ handle_info('timeout', #state{mcd_pid = undefined, host = Host, port = Port} = S
 	        
             {noreply, State, ?RESTART_INTERVAL}
    end;
-	
-handle_info({'EXIT', Pid, Reason}, #state{mcd_pid = Pid} = S) ->
-    error_logger:error_report([{memcached_crashed, Pid},
-        {reason, Reason},
-        {host, S#state.host},
-        {port, S#state.port},
-        {restarting_in, ?RESTART_INTERVAL}]),
+
+handle_info({'DOWN', MonitorRef, _, _, _}, #state{monitor=MonitorRef} = S) ->
+    log4erl:info("merle_watcher caught a DOWN event"),
     
-    % TODO: do we need this?
-    %local_pg2:leave({Host, Port}, Pid),
+    merle_pool:checkin_pid(self()),
+    
+    true = erlang:demonitor(MonitorRef),
+
+    {noreply, S#state{monitor = undefined}};
+	
+handle_info({'EXIT', Pid, _}, #state{mcd_pid = Pid} = S) ->
+    merle_pool:checkout_pid(self()),
+    
+    self() ! connect,
     
     {noreply, S#state{mcd_pid = undefined}, ?RESTART_INTERVAL};
     
 handle_info(_Info, S) ->
     error_logger:warning_report([{merle_watcher, self()}, {unknown_info, _Info}]),
 
-    case S#state.mcd_pid of
-    	undefined ->
-    	    {noreply, S, ?RESTART_INTERVAL};
-    	_ ->
-    	    {noreply, S}
-    end.
+    {noreply, S}.
     
 handle_cast(_Cast, S) ->
     {noreply, S}.
     
-terminate(_Reason, _S) ->
-    log4erl:info("Merle watcher terminated!"),
+terminate(_Reason, #state{mcd_pid = undefined}) ->
+    log4erl:error("Merle watcher terminated, mcd pid is empty!"),
+    ok;
+
+terminate(_Reason, #state{mcd_pid = McdPid}) ->
+    log4erl:error("Merle watcher terminated, killing mcd pid!"),
+    erlang:exit(McdPid, watcher_died),
     ok.

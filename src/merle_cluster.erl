@@ -1,6 +1,6 @@
 -module(merle_cluster).
 
--export([configure/2]).
+-export([configure/2, exec/4]).
 
 index_map(F, List) ->
     {Map, _} = lists:mapfoldl(fun(X, Iter) -> {F(X, Iter), Iter +1} end, 1, List),
@@ -26,14 +26,38 @@ configure(MemcachedHosts, ConnectionsPerHost) ->
     {M, B} = dynamic_compile:from_string(ModuleString),
     code:load_binary(M, "", B),
 
+    % start all merle watchers
     lists:foreach(
         fun([Host, Port]) ->
             lists:foreach(
                 fun(_) -> 
-                    supervisor:start_child(merle_sup, [[Host, Port]]) 
+                    supervisor:start_child(merle_watcher_sup, [[Host, Port]]) 
                 end,
                 lists:seq(1, ConnectionsPerHost)
             )
         end, 
         SortedMemcachedHosts
     ).
+
+
+exec(Key, Fun, FullDefault, Now) ->
+    S = merle_cluster_dynamic:get_server(Key),
+
+    case merle_pool:get_closest_pid(round_robin, S) of
+        in_use ->
+            FullDefault;
+
+        P ->
+            merle_watcher:monitor(P, self()),
+            
+            MC = merle_watcher:merle_connection(P),
+
+            Value = Fun(MC, Key),
+
+            merle_watcher:demonitor(P),
+
+            merle_pool:checkin_pid(P, Now),
+
+            Value
+
+    end.
