@@ -46,7 +46,7 @@ exec(Key, Fun, Default, Now) ->
     case merle_pool:get_closest_pid(round_robin, S) of
 
         in_use ->
-            log4erl:error("Merle watcher has uninitialized connection, shouldn't happen."),
+            log4erl:error("Designated merle connection is in use, returning default value"),
             {in_use, Default};
 
         P ->
