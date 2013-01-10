@@ -69,7 +69,7 @@ exec(Key, Fun, Default, Now) ->
                     case Fun(MC, Key) of
 
                         {error, Error} ->
-                            log4erl:error("Merle encountered error."),
+                            log4erl:error("Merle encountered error: ~p.", [Error]),
                             {Error, Default};
 
                         {ok, Value} ->
