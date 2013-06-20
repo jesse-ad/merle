@@ -205,14 +205,16 @@ check_out_state_indefinitely(State = #state{}) ->
     check_out_state(State, indefinite).
 
 
-check_out_state(State = #state{}, CheckOutTime) ->
+check_out_state(State = #state{host=Host, port=Port, index=I}, CheckOutTime) ->
+    merle_pool:set_cached_checkout_state({Host, Port}, I, true),
     State#state{
         checked_out = true,
         check_out_time = CheckOutTime
     }.
 
 
-check_in_state(State = #state{}) ->
+check_in_state(State = #state{host=Host, port=Port, index=I}) ->
+    merle_pool:set_cached_checkout_state({Host, Port}, I, false),
     State#state{
         checked_out = false,
         check_out_time = undefined

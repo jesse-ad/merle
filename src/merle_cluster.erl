@@ -60,7 +60,10 @@ exec_on_client({error, Error}, _Key, _Fun, Default, _Now) ->
 exec_on_client(undefined, _Key, _Fun, Default, _Now) ->
     lager:warning("Undefined merle client, returning default value"),
     {undefined_client, Default};
-exec_on_client(Client, Key, Fun, Default, Now) ->
+exec_on_client({client, _Client, true}, _Key, _Fun, Default, _Now) ->
+    lager:warning("Merle client is checked out"),
+    {checked_out, Default};
+exec_on_client({client, Client, _}, Key, Fun, Default, Now) ->
     exec_on_socket(merle_client:checkout(Client, self(), Now), Client, Key, Fun, Default).
 
 exec_on_socket(no_socket, _Client, _Key, _Fun, Default) ->

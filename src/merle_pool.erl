@@ -2,6 +2,8 @@
 
 -export([
     create/1, delete/1, join/3,
+    set_cached_checkout_state/3,
+    cached_checkout_state/2,
     clean_locks/0,
     get_client/3
 ]).
@@ -10,6 +12,7 @@
 
 -define(PIDS_TABLE, merle_pool_pids).
 -define(INDICES_TABLE, merle_pool_indices).
+-define(CLIENTS_STATE_TABLE, merle_pool_client_states).
 
 -define(CLEAN_LOCKS_INTERVAL, 10000). % every 10 seconds
 
@@ -73,18 +76,7 @@ clean_locks() ->
     {Cleaned, Connections}.
 
 
-shift_rr_index(Name, NumConnections) ->
-    try
-        ets:update_counter(?INDICES_TABLE, {Name, rr_index}, {2, 1, NumConnections, 1})
-    catch
-        _:_ ->
-            lager:error("Error shifting merle index for name ~p", [Name]),
-            0
-    end.
-    
-
 get_client(round_robin, Name, NumConnections) ->
-
     % Get the round robin index
     RRIndex = shift_rr_index(Name, NumConnections),
 
@@ -93,10 +85,23 @@ get_client(round_robin, Name, NumConnections) ->
             {error, no_client};
         [{_Key, Client}] ->
             case is_process_alive(Client) of
-                true -> Client;
+                true -> {client, Client, cached_checkout_state(Name, RRIndex)};
                 false -> {error, client_dead}
             end
     end.
+
+
+set_cached_checkout_state(Name, Index, CheckedOut) ->
+    % insert new pid into the table
+    ets:insert(?CLIENTS_STATE_TABLE, {{Name, Index}, CheckedOut}).
+
+
+cached_checkout_state(Name, Index) ->
+    case ets:lookup(?CLIENTS_STATE_TABLE, {Name, Index}) of
+        [] -> false;
+        [{_Key, CheckedOut}] -> CheckedOut
+    end.
+
 
 %%
 %%  SERVER FUNCTIONS
@@ -106,9 +111,11 @@ init([]) ->
     lager:info("Merle pool STARTING!"),
 
     process_flag(trap_exit, true),
+
     ets:new(?PIDS_TABLE, [set, public, named_table, {read_concurrency, true}]),
     ets:new(?INDICES_TABLE, [set, public, named_table, {read_concurrency, true}, {write_concurrency, true}]),
-    
+    ets:new(?CLIENTS_STATE_TABLE, [set, public, named_table, {read_concurrency, true}, {write_concurrency, true}]),
+
     PLC = timer:apply_interval(?CLEAN_LOCKS_INTERVAL, merle_pool, clean_locks, []),
 
     State = #server_state {
@@ -150,8 +157,8 @@ handle_cast(_Cast, S) ->
     {noreply, S}.
 
 handle_info({'EXIT', Pid, Reason} , S) ->
-    lager:error("merle_pool: caught merle_client EXIT, this shouldn't happen, ~p", [[Pid, Reason]]),
-    {noreply, S};
+    lager:error("Caught merle_client EXIT, this shouldn't happen, ~p", [[Pid, Reason]]),
+    {stop, Reason, S};
     
 handle_info(_Info, S) ->
     {noreply, S}.
@@ -161,6 +168,7 @@ terminate(_Reason, #server_state{ periodic_lock_clean=PLC }) ->
 
     ets:delete(?PIDS_TABLE),
     ets:delete(?INDICES_TABLE),
+    ets:delete(?CLIENTS_STATE_TABLE),
 
     timer:cancel(PLC),
     
@@ -171,6 +179,15 @@ terminate(_Reason, #server_state{ periodic_lock_clean=PLC }) ->
 %%
 %%  HELPER FUNCTIONS
 %%
+
+shift_rr_index(Name, NumConnections) ->
+    try
+        ets:update_counter(?INDICES_TABLE, {Name, rr_index}, {2, 1, NumConnections, 1})
+    catch
+        _:_ ->
+            lager:error("Error shifting merle index for name ~p", [Name]),
+            0
+    end.
 
 has_pool(Name, Pools) ->
     case proplists:get_value(Name, Pools) of
