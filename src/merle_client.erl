@@ -5,6 +5,7 @@
 -export([checkout/3, checkin/1, get_checkout_state/1, get_socket/1]).
 
 -define(RESTART_INTERVAL, 5000). %% retry each 5 seconds.
+-define(RECONNECT_INTERVAL, 2000 + random:uniform(5000)). %% reconnect somewhere b/w 2 and 7 seconds.
 
 -record(state, {
     host,
@@ -28,6 +29,8 @@ init([Host, Port, Index]) ->
     lager:info("Merle client ~p is STARTING", [[Host, Port, Index]]),
 
     erlang:process_flag(trap_exit, true),
+
+    random:seed(erlang:now()),
 
     merle_pool:create({Host, Port}),
     merle_pool:join({Host, Port}, Index, self()),
@@ -133,18 +136,20 @@ handle_info('connect', #state{host = Host, port = Port, checked_out = true, sock
             {noreply, check_in_state(State#state{socket = Socket})};
 
         ignore ->
-            timer:send_after(?RESTART_INTERVAL, self(), 'connect'),
+            erlang:send_after(?RECONNECT_INTERVAL, self(), 'connect'),
             {noreply, State};
 
         {error, Reason} ->
+            ReconnectInterval = ?RECONNECT_INTERVAL,
+
             error_logger:error_report([memcached_connection_error,
                 {reason, Reason},
                 {host, Host},
                 {port, Port},
-                {restarting_in, ?RESTART_INTERVAL}]
+                {restarting_in, ReconnectInterval}]
             ),
 	        
-	        timer:send_after(?RESTART_INTERVAL, self(), 'connect'),
+	        erlang:send_after(ReconnectInterval, self(), 'connect'),
 	        
             {noreply, State}
    end;
