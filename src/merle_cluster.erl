@@ -23,9 +23,9 @@ configure(MemcachedHosts, ConnectionsPerHost) ->
         index_map(fun([Host, Port], I) -> io_lib:format(DynModuleMap, [I-1, Host, Port]) end, SortedMemcachedHosts),
         DynModuleEnd
     ]),
-    
+
     lager:info("dyn module str ~p", [ModuleString]),
-    
+
     {M, B} = dynamic_compile:from_string(ModuleString),
     code:load_binary(M, "", B),
 

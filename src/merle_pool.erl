@@ -159,7 +159,7 @@ handle_cast(_Cast, S) ->
 handle_info({'EXIT', Pid, Reason} , S) ->
     lager:error("Caught merle_client EXIT, this shouldn't happen, ~p", [[Pid, Reason]]),
     {stop, Reason, S};
-    
+
 handle_info(_Info, S) ->
     {noreply, S}.
 

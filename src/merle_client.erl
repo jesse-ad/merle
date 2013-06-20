@@ -184,11 +184,11 @@ handle_cast(_Cast, S) ->
     
 
 terminate(_Reason, #state{socket = undefined}) ->
-    lager:info("Merle watcher TERMINATING, socket is empty!"),
+    lager:error("Merle watcher terminated, socket is empty!"),
     ok;
 
 terminate(_Reason, #state{socket = Socket}) ->
-    lager:info("Merle watcher TERMINATING, killing socket!"),
+    lager:error("Merle watcher terminated, killing socket!"),
     erlang:exit(Socket, watcher_died),
     ok.
 

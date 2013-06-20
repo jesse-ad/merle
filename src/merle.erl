@@ -520,7 +520,7 @@ send_get_cmd(Socket, Cmd, Timeout) ->
     Reply = case recv_complex_get_reply(Socket, Timeout) of
 		[{_, Value}] -> {ok, Value};
 		[] -> {error, not_found};
-		{error, Error} -> 
+		{error, Error} ->
             lager:warning("Encountered error from memcache; killing connection now: ~p", [Error]),
             erlang:exit(self(), Error),
             {error, Error}
