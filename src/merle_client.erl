@@ -4,7 +4,7 @@
 
 -export([checkout/3, checkin/1, get_checkout_state/1, get_socket/1]).
 
--define(RESTART_INTERVAL, 5000). %% retry each 5 seconds.
+-define(RESTART_INTERVAL, 5000). %% safety ensures we don't stay in a completely disconnected state for too long.
 -define(RECONNECT_INTERVAL, 2000 + random:uniform(5000)). %% reconnect somewhere b/w 2 and 7 seconds.
 
 -record(state, {
@@ -30,7 +30,7 @@ init([Host, Port, Index]) ->
 
     erlang:process_flag(trap_exit, true),
 
-    random:seed(erlang:now()),
+    random:seed(os:timestamp()),
 
     merle_pool:create({Host, Port}),
     merle_pool:join({Host, Port}, Index, self()),
