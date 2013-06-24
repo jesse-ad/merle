@@ -4,11 +4,13 @@
 
 -export([checkout/3, checkin/1, get_checkout_state/1, get_socket/1]).
 
--define(RESTART_INTERVAL, 5000). %% retry each 5 seconds.
+-define(RESTART_INTERVAL, 5000). %% safety ensures we don't stay in a completely disconnected state for too long.
+-define(RECONNECT_INTERVAL, 2000 + random:uniform(5000)). %% reconnect somewhere b/w 2 and 7 seconds.
 
 -record(state, {
     host,
     port,
+    index,
 
     socket,                 % memcached connection socket
 
@@ -19,23 +21,27 @@
 }).
 
 
-start_link([Host, Port]) ->
-    gen_server:start_link(?MODULE, [Host, Port], []).
+start_link([Host, Port, Index]) ->
+    gen_server:start_link(?MODULE, [Host, Port, Index], []).
 
 
-init([Host, Port]) ->
-    log4erl:info("Merle watcher initialized!"),
+init([Host, Port, Index]) ->
+    lager:info("Merle client ~p is STARTING", [[Host, Port, Index]]),
+
     erlang:process_flag(trap_exit, true),
 
+    random:seed(os:timestamp()),
+
     merle_pool:create({Host, Port}),
-    merle_pool:join({Host, Port}, self()),
+    merle_pool:join({Host, Port}, Index, self()),
 
     {
         ok,
         check_in_state(
             #state{
                 host = Host,
-                port = Port
+                port = Port,
+                index = Index
             }
         )
     }.
@@ -127,18 +133,23 @@ handle_call(_Call, _From, S) ->
 handle_info('connect', #state{host = Host, port = Port, checked_out = true, socket = undefined} = State) ->
     case merle:connect(Host, Port) of
         {ok, Socket} ->
-
             {noreply, check_in_state(State#state{socket = Socket})};
 
+        ignore ->
+            erlang:send_after(?RECONNECT_INTERVAL, self(), 'connect'),
+            {noreply, State};
+
         {error, Reason} ->
+            ReconnectInterval = ?RECONNECT_INTERVAL,
+
             error_logger:error_report([memcached_connection_error,
                 {reason, Reason},
                 {host, Host},
                 {port, Port},
-                {restarting_in, ?RESTART_INTERVAL}]
+                {restarting_in, ReconnectInterval}]
             ),
 	        
-	        timer:send_after(?RESTART_INTERVAL, self(), 'connect'),
+	        erlang:send_after(ReconnectInterval, self(), 'connect'),
 	        
             {noreply, State}
    end;
@@ -148,7 +159,7 @@ handle_info('connect', #state{host = Host, port = Port, checked_out = true, sock
 %%  Handles down events from monitored process.  Need to check back in if this happens.
 %%
 handle_info({'DOWN', MonitorRef, _, _, _}, #state{monitor=MonitorRef} = S) ->
-    log4erl:info("merle_watcher caught a DOWN event"),
+    lager:info("merle_watcher caught a DOWN event"),
     
     true = erlang:demonitor(MonitorRef),
 
@@ -161,6 +172,12 @@ handle_info({'DOWN', MonitorRef, _, _, _}, #state{monitor=MonitorRef} = S) ->
 handle_info({'EXIT', Socket, _}, S = #state{socket = Socket}) ->
     {noreply, connect_socket(S), ?RESTART_INTERVAL};
 
+handle_info({'EXIT', _, normal}, S) ->
+    {noreply, S};
+
+handle_info({'EXIT', _, Reason}, S) ->
+    lager:error("Caught an unexpected exit signal ~p", [Reason]),
+    {stop, Reason, S};
 
 handle_info(_Info, S) ->
     error_logger:warning_report([{merle_watcher, self()}, {unknown_info, _Info}]),
@@ -172,11 +189,11 @@ handle_cast(_Cast, S) ->
     
 
 terminate(_Reason, #state{socket = undefined}) ->
-    log4erl:error("Merle watcher terminated, socket is empty!"),
+    lager:error("Merle watcher terminated, socket is empty!"),
     ok;
 
 terminate(_Reason, #state{socket = Socket}) ->
-    log4erl:error("Merle watcher terminated, killing socket!"),
+    lager:error("Merle watcher terminated, killing socket!"),
     erlang:exit(Socket, watcher_died),
     ok.
 
@@ -193,14 +210,16 @@ check_out_state_indefinitely(State = #state{}) ->
     check_out_state(State, indefinite).
 
 
-check_out_state(State = #state{}, CheckOutTime) ->
+check_out_state(State = #state{host=Host, port=Port, index=I}, CheckOutTime) ->
+    merle_pool:set_cached_checkout_state({Host, Port}, I, true),
     State#state{
         checked_out = true,
         check_out_time = CheckOutTime
     }.
 
 
-check_in_state(State = #state{}) ->
+check_in_state(State = #state{host=Host, port=Port, index=I}) ->
+    merle_pool:set_cached_checkout_state({Host, Port}, I, false),
     State#state{
         checked_out = false,
         check_out_time = undefined

@@ -20,4 +20,4 @@ init([Instances, ConnectionsPerInstance]) ->
             permanent, 5000, supervisor, dynamic
         },
 
-    {ok, {{one_for_all, 10, 10}, [MerlePool, MerleWatcherSup]}}.
+    {ok, {{rest_for_one, 10, 10}, [MerlePool, MerleWatcherSup]}}.

@@ -17,6 +17,8 @@ start_child(N) ->
     supervisor:start_child(?MODULE, [N]).
 
 init([]) ->
+    lager:info("Merle client sup STARTING!"),
+
     MCDSpec = {mcd, {merle_client, start_link, []},
                 permanent, 5000, worker, dynamic},
     {ok, {{simple_one_for_one, 10, 10}, [MCDSpec]}}.

@@ -1,107 +1,45 @@
 -module(merle_pool).
 
-%% Basically the same functionality than pg2,  but process groups are local rather than global.
--export([create/1, delete/1, join/2, leave/2, 
-    get_members/1, count_available/1, clean_locks/0,
-    get_client/2,
-    which_groups/0]).
+-export([
+    create/1, delete/1, join/3,
+    set_cached_checkout_state/3,
+    cached_checkout_state/2,
+    clean_locks/0,
+    get_client/3
+]).
 
 -export([start_link/0, init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(PIDS_TABLE, merle_pool_pids).
 -define(INDICES_TABLE, merle_pool_indices).
+-define(CLIENTS_STATE_TABLE, merle_pool_client_states).
 
 -define(CLEAN_LOCKS_INTERVAL, 10000). % every 10 seconds
 
 -record(server_state, {
+    pools,
     periodic_lock_clean
 }).
 
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-create(Name) ->
-    case ets:lookup(?PIDS_TABLE, Name) of
-        [] ->
-            gen_server:call(?MODULE, {create, Name});
-        _ ->
-            ok
-    end.
-    
 delete(Name) ->
     gen_server:call(?MODULE, {delete, Name}).
 
-join(Name, Pid) when is_pid(Pid) ->
-    case ets:lookup(?PIDS_TABLE, Name) of
-        [] ->
-            {error, {no_such_group, Name}};
-        _ ->
-            gen_server:call(?MODULE, {join, Name, Pid})
-    end.
-    
-leave(Name, Pid) when is_pid(Pid) ->
-    case ets:lookup(?PIDS_TABLE, Name) of
-        [] ->
-            {error, {no_such_group, Name}};
-        _ ->
-            gen_server:call(?MODULE, {leave, Name, Pid})
-    end.
+create(Name) ->
+    gen_server:call(?MODULE, {create, Name}).
 
-get_members(Name) ->
-    case ets:lookup(?PIDS_TABLE, Name) of
-        [] -> {error, {no_such_group, Name}};
-        [{Name, Members}] -> Members
-    end.
+join(Name, Index, Pid) when is_pid(Pid) ->
+    gen_server:call(?MODULE, {join, Name, Index, Pid}).
 
-which_groups() ->
-    [K || {K, _Members} <- ets:tab2list(?PIDS_TABLE)].
-
-count_available(Name) ->
-    case ets:lookup(?PIDS_TABLE, Name) of
-
-        [] -> {error, {no_such_group, Name}};
-
-        [{Name, Members}] -> 
-            NumAvail = lists:foldl(
-                fun(Member, Acc) -> 
-                    case merle_client:get_checkout_state(Member) of
-                        {false, _} ->
-                            Acc + 1;
-                        _ ->
-                            Acc
-                    end
-                end, 
-                0, 
-                Members
-            ),
-            
-            {length(Members), NumAvail}
-    end.    
-    
 clean_locks() ->
-    L = ets:tab2list(?PIDS_TABLE),
-
-    {Cleaned, Connections} = lists:foldl(
-        fun({_, Pids}, {C, V}) -> 
-            {C2, V2} = clean_locks(Pids),
-            {C + C2, V + V2}
-        end, 
-        {0, 0}, 
-        L
-    ),
-    
-    log4erl:error("Cleaned ~p merle locks on ~p valid connections", [Cleaned, Connections]),
-    
-    {Cleaned, Connections}.
-
-clean_locks(Clients) ->
     NowSecs = now_secs(),
     CleanLocksIntervalSecs = ?CLEAN_LOCKS_INTERVAL div 1000,
 
-    Acc = lists:foldl(
-        fun(Client, {NumCleaned, ValidConnections}) ->
-                        
-            % clear locks with stale last_unlocked time 
+    {Cleaned, Connections} = ets:foldl(
+        fun({{_Name, _Index}, Client}, {NumCleaned, ValidConnections}) ->
+            % clear locks with stale last_unlocked time
             NumCleaned2 = case merle_client:get_checkout_state(Client) of
                 {false, _} ->
                     NumCleaned;
@@ -118,134 +56,119 @@ clean_locks(Clients) ->
                             NumCleaned
                     end
             end,
-            
+
             % maintain a count of the number of valid connections
             ValidConnections2 = case merle_client:get_socket(Client) of
                 undefined -> ValidConnections;
                 _ -> ValidConnections + 1
-            end,           
-            
+            end,
+
             {NumCleaned2, ValidConnections2}
         end,
 
-        {0, 0},
+        {0, 0}, 
 
-        Clients
+        ?PIDS_TABLE
     ),
     
-    Acc.
+    lager:error("Cleaned ~p merle locks on ~p valid connections", [Cleaned, Connections]),
     
+    {Cleaned, Connections}.
 
-shift_rr_index(Name, MembersLen) ->
-    ets:update_counter(?INDICES_TABLE, {Name, rr_index}, {2, 1, MembersLen, 1}).
-    
 
-get_client(random, Name) ->
-    case ets:lookup(?PIDS_TABLE, Name) of
+get_client(round_robin, Name, NumConnections) ->
+    % Get the round robin index
+    RRIndex = shift_rr_index(Name, NumConnections),
+
+    case ets:lookup(?PIDS_TABLE, {Name, RRIndex}) of
         [] ->
-            {error, {no_process, Name}};
-        [{Name, Members}] ->
-            %% TODO:  we can get more inteligent, check queue size, reductions, etc.
-            %% http://lethain.com/entry/2009/sep/12/load-balancing-across-erlang-process-groups/
-            {_, _, X} = erlang:now(),
-
-            Pid = lists:nth((X rem length(Members)) +1, Members),
-
-            Pid
-    end;
-
-get_client(round_robin, Name) ->
-    case ets:lookup(?PIDS_TABLE, Name) of
-        [] ->
-            {error, {no_process, Name}};
-        [{Name, Members}] ->           
-         
-            MembersLen = length(Members),
-        
-            % Get the round robin index        
-            RRIndex = shift_rr_index(Name, MembersLen),
-
-            lists:nth(RRIndex, Members)
+            {error, no_client};
+        [{_Key, Client}] ->
+            case is_process_alive(Client) of
+                true -> {client, Client, cached_checkout_state(Name, RRIndex)};
+                false -> {error, client_dead}
+            end
     end.
+
+
+set_cached_checkout_state(Name, Index, CheckedOut) ->
+    % insert new pid into the table
+    ets:insert(?CLIENTS_STATE_TABLE, {{Name, Index}, CheckedOut}).
+
+
+cached_checkout_state(Name, Index) ->
+    case ets:lookup(?CLIENTS_STATE_TABLE, {Name, Index}) of
+        [] -> false;
+        [{_Key, CheckedOut}] -> CheckedOut
+    end.
+
 
 %%
 %%  SERVER FUNCTIONS
 %%
 
 init([]) ->
+    lager:info("Merle pool STARTING!"),
+
     process_flag(trap_exit, true),
+
     ets:new(?PIDS_TABLE, [set, public, named_table, {read_concurrency, true}]),
-    ets:new(?INDICES_TABLE, [set, public, named_table, {write_concurrency, true}]),
-    
+    ets:new(?INDICES_TABLE, [set, public, named_table, {read_concurrency, true}, {write_concurrency, true}]),
+    ets:new(?CLIENTS_STATE_TABLE, [set, public, named_table, {read_concurrency, true}, {write_concurrency, true}]),
+
     PLC = timer:apply_interval(?CLEAN_LOCKS_INTERVAL, merle_pool, clean_locks, []),
 
     State = #server_state {
+        pools = [],
         periodic_lock_clean = PLC
     },
 
     {ok, State}.
 
-handle_call({create, Name}, _From, S) ->
-    case ets:lookup(?PIDS_TABLE, Name) of
-        [] ->
+handle_call({create, Name}, _From, S = #server_state{pools = Pools}) ->
+    S2 = case has_pool(Name, Pools) of
+        false ->
             ets:insert(?INDICES_TABLE, {{Name, rr_index}, 1}),
-            ets:insert(?PIDS_TABLE, {Name, []});
-        _ ->
-            ok
+            S#server_state{pools = [{Name, 0} | Pools]};
+        true ->
+            S
     end,
-    {reply, ok, S};
 
-handle_call({join, Name, Pid}, _From, S) ->
-    case ets:lookup(?PIDS_TABLE, Name) of
-        [] ->
+    {reply, ok, S2};
+
+handle_call({join, Name, Index, Pid}, _From, S = #server_state{pools = Pools}) ->
+    case has_pool(Name, Pools) of
+        false ->
             {reply, no_such_group, S};
-        [{Name, Members}] ->
-
-            % NOTE: skip one index since we are about to grow the list, this prevents collisions
-            shift_rr_index(Name, length(Members)),
+        true ->
+            lager:info("Client is joining pool ~p at index ~p", [Name, Index]),
 
             % insert new pid into the table
-            ets:insert(?PIDS_TABLE, {Name, [Pid | Members]}),
+            ets:insert(?PIDS_TABLE, {{Name, Index}, Pid}),
 
-            % NOTE: link processes on join, so that if client dies, we remove it from the pool
+            % NOTE: link processes on join, so that if client dies, we know about it,
+            % ALSO: if I die, the clients will all restart as well
             link(Pid),
 
-            {reply, ok, S}
-    end;
+            {reply, ok, S#server_state{pools = inc_pool(Name, Pools)}}
+    end.
             
-handle_call({leave, Name, Pid}, _From, S) ->
-    case ets:lookup(?PIDS_TABLE, Name) of
-        [] ->
-            {reply, no_such_group, S};
-        [{Name, Members}] ->
-            case lists:delete(Pid, Members) of
-                [] ->
-                    ets:delete(?PIDS_TABLE, Name);
-                NewMembers ->
-                    ets:insert(?PIDS_TABLE, {Name, NewMembers})
-            end,
-            unlink(Pid),
-            {reply, ok, S}
-     end;
-
-handle_call({delete, Name}, _From, S) ->
-    ets:delete(?PIDS_TABLE, Name),
-    {reply, ok, S}.
-
 handle_cast(_Cast, S) ->
     {noreply, S}.
 
-handle_info({'EXIT', Pid, _} , S) ->
-    log4erl:error("Caught local_pg2 EXIT... leaving pg"),
-    del_member(Pid),
-    {noreply, S};
-    
+handle_info({'EXIT', Pid, Reason} , S) ->
+    lager:error("Caught merle_client EXIT, this shouldn't happen, ~p", [[Pid, Reason]]),
+    {stop, Reason, S};
+
 handle_info(_Info, S) ->
     {noreply, S}.
 
 terminate(_Reason, #server_state{ periodic_lock_clean=PLC }) ->
+    lager:error("Merle pool TERMINATING!"),
+
     ets:delete(?PIDS_TABLE),
     ets:delete(?INDICES_TABLE),
+    ets:delete(?CLIENTS_STATE_TABLE),
 
     timer:cancel(PLC),
     
@@ -253,28 +176,29 @@ terminate(_Reason, #server_state{ periodic_lock_clean=PLC }) ->
     ok.
 
 
-
 %%
 %%  HELPER FUNCTIONS
 %%
 
+shift_rr_index(Name, NumConnections) ->
+    try
+        ets:update_counter(?INDICES_TABLE, {Name, rr_index}, {2, 1, NumConnections, 1})
+    catch
+        _:_ ->
+            lager:error("Error shifting merle index for name ~p", [Name]),
+            0
+    end.
+
+has_pool(Name, Pools) ->
+    case proplists:get_value(Name, Pools) of
+        undefined -> false;
+        _ -> true
+    end.
+
+inc_pool(Name, Pools) ->
+    PoolSize = proplists:get_value(Name, Pools),
+    lists:keyreplace(Name, 1, Pools, {Name, PoolSize+1}).
+
 now_secs() ->
     {NowMegaSecs, NowSecs, _} = erlang:now(),
     (1.0e+6 * NowMegaSecs) + NowSecs.
-
-del_member(Pid) ->
-    L = ets:tab2list(?PIDS_TABLE),
-    lists:foreach(fun(Elem) -> del_member_func(Elem, Pid) end, L).
-                   
-del_member_func({Name, Members}, Pid) ->
-    case lists:member(Pid, Members) of
-          true ->
-              case lists:delete(Pid, Members) of
-                  [] ->
-                      ets:delete(?PIDS_TABLE, Name);
-                  NewMembers ->
-                      ets:insert(?PIDS_TABLE, {Name, NewMembers})
-              end;
-          false ->
-              ok
-     end.
